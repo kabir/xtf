@@ -74,6 +74,8 @@ import io.fabric8.kubernetes.client.AppsAPIGroupClient;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.LocalPortForward;
+import io.fabric8.kubernetes.client.dsl.FilterWatchListDeletable;
+import io.fabric8.kubernetes.client.dsl.FilterWatchListMultiDeletable;
 import io.fabric8.kubernetes.client.dsl.LogWatch;
 import io.fabric8.openshift.api.model.Build;
 import io.fabric8.openshift.api.model.BuildConfig;
@@ -104,6 +106,17 @@ public class OpenShift extends DefaultOpenShiftClient {
     public static final String KEEP_LABEL = "xtf.cz/keep";
 
     /**
+     * Property containing a list of labels names and values for resources which should not be cleaned.
+     * A few examples:
+     * label/name-A:value1
+     * label/name-A:value1,label/name-B:value2
+     *
+     * For this one, we have multiple values for 'label/name-A':
+     * label/name-A:value1,label/name-A:value2
+     */
+    public static final String SKIP_CLEAN_LABELS = "xtf.openshift.skip.clean.labels";
+
+    /**
      * Used to cache created Openshift clients for given test case.
      */
     public static final Multimap<String, OpenShift> namespaceToOpenshiftClientMap = Multimaps
@@ -116,6 +129,8 @@ public class OpenShift extends DefaultOpenShiftClient {
      */
     public static final String XTF_MANAGED_LABEL = "xtf.cz/managed";
     private final AppsAPIGroupClient appsAPIGroupClient;
+
+    private final Map<String, String[]> skipCleanLabels;
 
     /**
      * Autoconfigures the client with the default fabric8 client rules
@@ -221,6 +236,29 @@ public class OpenShift extends DefaultOpenShiftClient {
         appsAPIGroupClient = new AppsAPIGroupClient(this);
 
         this.waiters = new OpenShiftWaiters(this);
+        this.skipCleanLabels = parseSkipCleanLabels(SKIP_CLEAN_LABELS);
+    }
+
+    private static Map<String, String[]> parseSkipCleanLabels(String propertyName) {
+        String property = System.getProperty(propertyName);
+        if (property == null) {
+            return Collections.emptyMap();
+        }
+        Map<String, List<String>> map = new HashMap<>();
+
+        String[] keyValues = property.split(",");
+        for (String keyValue : keyValues) {
+            String[] parts = keyValue.split(":");
+            if (parts.length != 2) {
+                throw new IllegalStateException("Bad key/value: " + keyValue);
+            }
+            List<String> list = map.computeIfAbsent(parts[0], s1 -> new ArrayList<>());
+            list.add(parts[1]);
+        }
+
+        Map<String, String[]> result = new HashMap<>();
+        map.forEach((k, v) -> result.put(k, v.toArray(new String[v.size()])));
+        return result;
     }
 
     public void setupPullSecret(String secret) {
@@ -630,7 +668,7 @@ public class OpenShift extends DefaultOpenShiftClient {
      * @return List of secrets that aren't considered default.
      */
     public List<Secret> getUserSecrets() {
-        return secrets().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems().stream()
+        return filter(secrets()).list().getItems().stream()
                 .filter(s -> !s.getType().startsWith("kubernetes.io/"))
                 .collect(Collectors.toList());
     }
@@ -921,7 +959,7 @@ public class OpenShift extends DefaultOpenShiftClient {
      * @return List of service accounts that aren't considered default.
      */
     public List<ServiceAccount> getUserServiceAccounts() {
-        return serviceAccounts().withLabelNotIn(KEEP_LABEL, "", "true").list().getItems().stream()
+        return filter(serviceAccounts()).list().getItems().stream()
                 .filter(sa -> !sa.getMetadata().getName().matches("builder|default|deployer"))
                 .collect(Collectors.toList());
     }
@@ -965,7 +1003,7 @@ public class OpenShift extends DefaultOpenShiftClient {
      * @return List of role bindings that aren't considered default.
      */
     public List<RoleBinding> getUserRoleBindings() {
-        return rbac().roleBindings().withLabelNotIn(KEEP_LABEL, "", "true")
+        return filter(rbac().roleBindings())
                 .withLabelNotIn("olm.owner.kind", "ClusterServiceVersion").list().getItems().stream()
                 .filter(rb -> !rb.getMetadata().getName()
                         .matches("admin|system:deployers|system:image-builders|system:image-pullers"))
@@ -1146,7 +1184,7 @@ public class OpenShift extends DefaultOpenShiftClient {
      * @return List of configmaps created by user
      */
     public List<ConfigMap> getUserConfigMaps() {
-        return configMaps().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems().stream()
+        return filter(configMaps()).list().getItems().stream()
                 .filter(cm -> !cm.getMetadata().getName().equals("kube-root-ca.crt"))
                 .filter(cm -> !cm.getMetadata().getName().equals("openshift-service-ca.crt"))
                 .collect(Collectors.toList());
@@ -1285,29 +1323,29 @@ public class OpenShift extends DefaultOpenShiftClient {
             }
         }
 
-        templates().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        apps().deployments().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        apps().replicaSets().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        apps().statefulSets().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        batch().jobs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        deploymentConfigs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        replicationControllers().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        buildConfigs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        imageStreams().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        endpoints().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        services().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        builds().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        routes().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        pods().withLabelNotIn(KEEP_LABEL, "", "true").withGracePeriod(0).delete();
-        persistentVolumeClaims().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        autoscaling().v1().horizontalPodAutoscalers().withLabelNotIn(KEEP_LABEL, "", "true").delete();
+        filter(templates()).delete();
+        filter(apps().deployments()).delete();
+        filter(apps().replicaSets()).delete();
+        filter(apps().statefulSets()).delete();
+        filter(batch().jobs()).delete();
+        filter(deploymentConfigs()).delete();
+        filter(replicationControllers()).delete();
+        filter(buildConfigs()).delete();
+        filter(imageStreams()).delete();
+        filter(endpoints()).delete();
+        filter(services()).delete();
+        filter(builds()).delete();
+        filter(routes()).delete();
+        filter(pods()).withGracePeriod(0).delete();
+        filter(persistentVolumeClaims()).delete();
+        filter(autoscaling().v1().horizontalPodAutoscalers()).delete();
         getUserConfigMaps().forEach(this::deleteConfigMap);
         getUserSecrets().forEach(this::deleteSecret);
         getUserServiceAccounts().forEach((sa) -> {
             this.deleteServiceAccount(sa);
         });
         getUserRoleBindings().forEach(this::deleteRoleBinding);
-        rbac().roles().withLabelNotIn(KEEP_LABEL, "", "true").withLabelNotIn("olm.owner.kind", "ClusterServiceVersion")
+        filter(rbac().roles()).withLabelNotIn("olm.owner.kind", "ClusterServiceVersion")
                 .delete();
 
         for (HasMetadata hasMetadata : listRemovableResources()) {
@@ -1318,31 +1356,41 @@ public class OpenShift extends DefaultOpenShiftClient {
         return waiters.isProjectClean();
     }
 
+    private <T, L> FilterWatchListDeletable<T, L> filter(FilterWatchListMultiDeletable<T, L> op) {
+        FilterWatchListDeletable<T, L> filtered = op.withLabelNotIn(KEEP_LABEL, "", "true");
+
+        for (Map.Entry<String, String[]> label : skipCleanLabels.entrySet()) {
+            filtered = filtered.withLabelNotIn(label.getKey(), label.getValue());
+        }
+
+        return filtered;
+    }
+
     List<HasMetadata> listRemovableResources() {
         // keep the order for deletion to prevent K8s creating resources again
         List<HasMetadata> removables = new ArrayList<>();
-        removables.addAll(templates().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(apps().deployments().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(apps().replicaSets().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(batch().jobs().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(deploymentConfigs().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(apps().statefulSets().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(replicationControllers().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(buildConfigs().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(imageStreams().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(endpoints().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(services().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(builds().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(routes().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(pods().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(persistentVolumeClaims().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(autoscaling().v1().horizontalPodAutoscalers().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list()
+        removables.addAll(filter(templates()).list().getItems());
+        removables.addAll(filter(apps().deployments()).list().getItems());
+        removables.addAll(filter(apps().replicaSets()).list().getItems());
+        removables.addAll(filter(batch().jobs()).list().getItems());
+        removables.addAll(filter(deploymentConfigs()).list().getItems());
+        removables.addAll(filter(apps().statefulSets()).list().getItems());
+        removables.addAll(filter(replicationControllers()).list().getItems());
+        removables.addAll(filter(buildConfigs()).list().getItems());
+        removables.addAll(filter(imageStreams()).list().getItems());
+        removables.addAll(filter(endpoints()).list().getItems());
+        removables.addAll(filter(services()).list().getItems());
+        removables.addAll(filter(builds()).list().getItems());
+        removables.addAll(filter(routes()).list().getItems());
+        removables.addAll(filter(pods()).list().getItems());
+        removables.addAll(filter(persistentVolumeClaims()).list().getItems());
+        removables.addAll(filter(autoscaling().v1().horizontalPodAutoscalers()).list()
                 .getItems());
         removables.addAll(getUserConfigMaps());
         removables.addAll(getUserSecrets());
         removables.addAll(getUserServiceAccounts());
         removables.addAll(getUserRoleBindings());
-        removables.addAll(rbac().roles().withLabelNotIn(KEEP_LABEL, "", "true")
+        removables.addAll(filter(rbac().roles())
                 .withLabelNotIn("olm.owner.kind", "ClusterServiceVersion").list().getItems());
 
         return removables;
