@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.builder.EqualsBuilder;
@@ -33,6 +34,7 @@ import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 
+import cz.xtf.core.cleaner.filters.OpenShiftCleanerFilter;
 import cz.xtf.core.config.WaitingConfig;
 import cz.xtf.core.event.EventList;
 import cz.xtf.core.openshift.crd.CustomResourceDefinitionContextProvider;
@@ -117,6 +119,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     public static final String SKIP_CLEAN_LABELS = "xtf.openshift.skip.clean.labels";
 
     /**
+     * Property containing a list of {@link OpenShiftCleanerFilter} implementation classes, used to further
+     * filter what is considered a resource provided by OpenShift or by us.
+     */
+    public static final String SKIP_CLEAN_FILTER_CLASSES = "xtf.openshift.skip.filter.classes";
+
+    /**
      * Used to cache created Openshift clients for given test case.
      */
     public static final Multimap<String, OpenShift> namespaceToOpenshiftClientMap = Multimaps
@@ -131,6 +139,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     private final AppsAPIGroupClient appsAPIGroupClient;
 
     private final Map<String, String[]> skipCleanLabels;
+    private final List<OpenShiftCleanerFilter> cleanerFilters;
 
     /**
      * Autoconfigures the client with the default fabric8 client rules
@@ -237,6 +246,7 @@ public class OpenShift extends DefaultOpenShiftClient {
 
         this.waiters = new OpenShiftWaiters(this);
         this.skipCleanLabels = parseSkipCleanLabels(SKIP_CLEAN_LABELS);
+        this.cleanerFilters = parseCleanerFilters();
     }
 
     private static Map<String, String[]> parseSkipCleanLabels(String propertyName) {
@@ -259,6 +269,30 @@ public class OpenShift extends DefaultOpenShiftClient {
         Map<String, String[]> result = new HashMap<>();
         map.forEach((k, v) -> result.put(k, v.toArray(new String[v.size()])));
         return result;
+    }
+
+    private static List<OpenShiftCleanerFilter> parseCleanerFilters() {
+        String property = System.getProperty(SKIP_CLEAN_FILTER_CLASSES);
+        if (property == null) {
+            return Collections.emptyList();
+        }
+        Class<OpenShiftCleanerFilter> iface = OpenShiftCleanerFilter.class;
+
+        List<OpenShiftCleanerFilter> list = new ArrayList<>();
+        String[] parts = property.split(",");
+        for (String className : parts) {
+            if (!className.contains(".")) {
+                className = iface.getPackageName().toString() + "." + className;
+            }
+            try {
+                Class<? extends OpenShiftCleanerFilter> clazz = Class.forName(className)
+                        .asSubclass(OpenShiftCleanerFilter.class);
+                list.add(clazz.getConstructor().newInstance());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return list;
     }
 
     public void setupPullSecret(String secret) {
@@ -1003,11 +1037,15 @@ public class OpenShift extends DefaultOpenShiftClient {
      * @return List of role bindings that aren't considered default.
      */
     public List<RoleBinding> getUserRoleBindings() {
-        return filter(rbac().roleBindings())
+        Stream<RoleBinding> stream = filter(rbac().roleBindings())
                 .withLabelNotIn("olm.owner.kind", "ClusterServiceVersion").list().getItems().stream()
                 .filter(rb -> !rb.getMetadata().getName()
-                        .matches("admin|system:deployers|system:image-builders|system:image-pullers"))
-                .collect(Collectors.toList());
+                        .matches("admin|system:deployers|system:image-builders|system:image-pullers"));
+
+        for (OpenShiftCleanerFilter filter : cleanerFilters) {
+            stream = stream.filter(rb -> filter.filterRoleBinding(rb));
+        }
+        return stream.collect(Collectors.toList());
     }
 
     public boolean deleteRoleBinding(RoleBinding roleBinding) {
